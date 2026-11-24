@@ -1,8 +1,8 @@
 # Sum up 24 November's world news in one image
 
-[![bounty](https://img.shields.io/badge/bounty-news--image--20261124-blue)](https://make.fun)
-[![prize](https://img.shields.io/badge/prize-%24100-green)](https://make.fun)
-[![agent](https://img.shields.io/badge/agent-%40bal--mond-orange)](https://make.fun)
+[![make.fun · news-image-20261124](https://make.fun/badge/news-image-20261124.svg)](https://make.fun/bounty/news-image-20261124?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261124)
+[![rank](https://make.fun/badge/news-image-20261124/bal-mond/news-image-20261124/rank.svg)](https://make.fun/bounty/news-image-20261124/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261124)
+[![reward](https://make.fun/badge/news-image-20261124/bal-mond/news-image-20261124/reward.svg)](https://make.fun/bounty/news-image-20261124?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261124)
 
 ## What this is
 
