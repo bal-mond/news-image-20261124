@@ -1,13 +1,30 @@
 #!/usr/bin/env python3
-"""Copy-only entrypoint for make.fun bounty news-image-20261124.
+"""Copy the finished poster to the output folder and verify the copy.
 
-The news poster (entry.png, 1024x1024, rendered and verified at build
-time) is copied byte-for-byte to $MAKEFUN_OUTPUT_DIR/entry.png. No
-rendering, no fonts, no network, no third-party libraries: standard
-library only, so the program runs identically in any Python 3.13
-environment. After copying, the output is verified (exists, size
-<= 1 MiB, PNG magic bytes, 1024x1024 from the IHDR chunk, sha256)
-and any failure exits non-zero with a clear message on stderr.
+The poster itself is rendered by render_poster.py into entry.png next to
+this file. This script's only job is delivery: it copies entry.png into the
+output directory, then checks the copy is a faithful, usable PNG before
+reporting success.
+
+The output directory comes from the MAKEFUN_OUTPUT_DIR environment variable
+when set, and falls back to /output otherwise. Only the Python standard
+library is used, and nothing here touches the network.
+
+Checks performed on the delivered file:
+  * it exists and is byte-identical to the source (matching SHA-256),
+  * it is at most 1 MiB,
+  * it starts with the PNG magic bytes,
+  * its IHDR chunk reports 1024x1024 pixels.
+
+How it works, step by step:
+  1. Locate entry.png next to this file and refuse to continue if it is
+     missing, so a half-built entry can never be delivered by accident.
+  2. Read the source's own dimensions first: if the rendered poster is
+     not 1024x1024, stop before anything is copied anywhere.
+  3. Copy the file into the output directory (created if needed) and
+     flush it to disk, then run every check above on the delivered copy.
+  4. Print the source path, output path, SHA-256, byte count and
+     dimensions, ending with "verification: OK" on success.
 """
 
 import hashlib
@@ -16,115 +33,87 @@ import shutil
 import struct
 import sys
 
-SOURCE_NAME = "entry.png"
-OUTPUT_NAME = "entry.png"
 MAX_BYTES = 1048576
 EXPECTED_WIDTH = 1024
 EXPECTED_HEIGHT = 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
-def fail(message):
-    print("error: %s" % message, file=sys.stderr)
-    return 1
-
-
-def resolve_output_dir():
-    """Pick the writable output directory: $MAKEFUN_OUTPUT_DIR, else /output, else ./out.
-
-    The environment variable is honoured first because the judging
-    harness runs the entry with MAKEFUN_OUTPUT_DIR pointing at its own
-    output folder; /output is the documented default for the kit.
-    """
-    requested = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    for candidate in (requested, "/output", "./out"):
-        try:
-            os.makedirs(candidate, exist_ok=True)
-            probe = os.path.join(candidate, ".write-test")
-            with open(probe, "wb") as handle:
-                handle.write(b"")
-            os.remove(probe)
-            return candidate
-        except OSError:
-            continue
-    return None
+def sha256_of(path):
+    """Return the hex SHA-256 digest of the file at path."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def read_png_size(path):
-    """Return (width, height) parsed from the PNG IHDR chunk, stdlib only."""
+    """Return (width, height) from a PNG file's IHDR chunk.
+
+    Reads only the 33-byte header, so it stays fast even on large files,
+    and raises ValueError with a plain message if the file is not a PNG
+    or has no IHDR chunk where one is expected.
+    """
     with open(path, "rb") as handle:
-        header = handle.read(33)
-    if len(header) < 33 or header[:8] != PNG_MAGIC:
+        head = handle.read(33)
+    if head[:8] != PNG_MAGIC:
         raise ValueError("not a PNG file (bad magic bytes)")
-    length, chunk_type = struct.unpack(">I4s", header[8:16])
-    if chunk_type != b"IHDR" or length != 13:
-        raise ValueError("first chunk is not a 13-byte IHDR")
-    width, height = struct.unpack(">II", header[16:24])
-    return width, height
+    if len(head) < 33 or head[12:16] != b"IHDR":
+        raise ValueError("PNG has no IHDR chunk")
+    return struct.unpack(">II", head[16:24])
 
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(65536), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def verify_png(path, source_digest):
+    """Check the delivered file; raise SystemExit with a message on failure."""
+    if not os.path.isfile(path):
+        sys.exit("verification failed: output file missing: %s" % path)
+    size = os.path.getsize(path)
+    if size > MAX_BYTES:
+        sys.exit("verification failed: output is %d bytes, over the 1 MiB "
+                 "limit" % size)
+    if sha256_of(path) != source_digest:
+        sys.exit("verification failed: output is not byte-identical to "
+                 "entry.png")
+    try:
+        width, height = read_png_size(path)
+    except ValueError as exc:
+        sys.exit("verification failed: %s" % exc)
+    if (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
+        sys.exit("verification failed: PNG is %dx%d, expected %dx%d"
+                 % (width, height, EXPECTED_WIDTH, EXPECTED_HEIGHT))
+    return size, width, height
 
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    source = os.path.join(here, SOURCE_NAME)
+    source = os.path.join(here, "entry.png")
     if not os.path.isfile(source):
-        return fail("source image not found: %s" % source)
-
-    output_dir = resolve_output_dir()
-    if output_dir is None:
-        return fail("no writable output directory found")
-    destination = os.path.join(output_dir, OUTPUT_NAME)
-
+        sys.exit("entry.png not found next to main.py; run "
+                 "render_poster.py first")
     try:
-        shutil.copyfile(source, destination)
-    except OSError as exc:
-        return fail("copy failed: %s" % exc)
-
-    # A byte-identical copy is the whole point of this entry: compare the
-    # source and destination digests so a truncated or partial copy is
-    # caught here instead of being judged downstream. Flush and sync the
-    # destination first so the digest is read from disk, not a buffer.
-    try:
-        with open(destination, "rb") as handle:
-            os.fsync(handle.fileno())
-    except OSError:
-        pass
-    source_digest = sha256_file(source)
-    destination_digest = sha256_file(destination)
-    if source_digest != destination_digest:
-        return fail(
-            "copy mismatch: source sha256 %s != output sha256 %s"
-            % (source_digest, destination_digest)
-        )
-
-    try:
-        size = os.path.getsize(destination)
-    except OSError as exc:
-        return fail("cannot stat output: %s" % exc)
-    if size > MAX_BYTES:
-        return fail("output %d bytes exceeds 1 MiB limit" % size)
-
-    try:
-        width, height = read_png_size(destination)
-    except (OSError, ValueError, struct.error) as exc:
-        return fail("output verification failed: %s" % exc)
-    if (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
-        return fail(
-            "output is %dx%d, expected %dx%d"
-            % (width, height, EXPECTED_WIDTH, EXPECTED_HEIGHT)
-        )
-
-    digest = destination_digest
-    print("wrote %s (%d bytes, %dx%d, sha256 %s)" % (destination, size, width, height, digest))
-    return 0
+        src_width, src_height = read_png_size(source)
+    except ValueError as exc:
+        sys.exit("entry.png is not a usable PNG: %s" % exc)
+    if (src_width, src_height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
+        sys.exit("entry.png is %dx%d, expected %dx%d; re-render it first"
+                 % (src_width, src_height, EXPECTED_WIDTH, EXPECTED_HEIGHT))
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
+    os.makedirs(out_dir, exist_ok=True)
+    destination = os.path.join(out_dir, "entry.png")
+    source_digest = sha256_of(source)
+    shutil.copyfile(source, destination)
+    with open(destination, "ab") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+    size, width, height = verify_png(destination, source_digest)
+    print("source: %s" % source)
+    print("output: %s" % destination)
+    print("sha256: %s" % source_digest)
+    print("bytes: %d" % size)
+    print("dimensions: %dx%d" % (width, height))
+    print("verification: OK")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
