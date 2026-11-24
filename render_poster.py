@@ -1,342 +1,359 @@
 #!/usr/bin/env python3
-"""Render the 24 November 2026 world-news poster (1024x1024) with Pillow.
+"""Render the front page of THE WORLD IN ONE DAY for Tuesday 24 November 2026.
 
-Newspaper layout, all artwork drawn here with PIL primitives: no photos,
-no downloaded images, no network. Every story below was checked against
-web search results dated Tuesday 24 November 2026 before being written
-in. Output: entry.png next to this script (1024x1024, under 1 MiB).
+A single 1024x1024 newspaper-style poster holding 30 world stories from one
+day: three lead stories across the top, then three columns of nine stories
+each (war & diplomacy, markets & the Americas, science / tech / sport / life),
+a bottom ticker repeating the leads, and a plain footer line.
+
+Everything is drawn with Pillow from scratch: no photographs, no downloaded
+images, no network access. All text is set in the DejaVu family, which ships
+with most Linux systems. The script writes entry.png next to itself and
+prints the file size and a short integrity summary.
+
+Layout (1024x1024, all y coordinates in pixels):
+  masthead title ............ y 26-95, centred serif, 54 pt
+  date line ................. y 106-135, red, 22 pt
+  story-count strap ......... y 150-170
+  top-stories teaser line ... y 176-195, one line, centred
+  three lead stories ........ y 214 onwards, side by side
+  three columns ............. top ~y 250, bottom edge y 884
+  ticker band ............... y 896-944, navy, white text
+  footer line ............... y 962, centred, 13 pt
+
+Column text is word-wrapped to the column width, so nothing can run past
+the page edges, and each column raises an error if it would overflow its
+budget instead of drawing outside the poster.
 """
-import textwrap
+
+import hashlib
+import os
+
 from PIL import Image, ImageDraw, ImageFont
 
-W, H = 1024, 1024
-BG = (247, 243, 234)      # warm paper
+SIZE = 1024
+MARGIN = 36
+GUTTER = 20
+COL_W = (SIZE - 2 * MARGIN - 2 * GUTTER) // 3
+
+PAPER = (247, 243, 234)
 INK = (26, 26, 26)
-RED = (178, 34, 34)
-NAVY = (18, 32, 62)
-GREY = (110, 108, 100)
-BODY_GREY = (62, 62, 62)
-LINE = (200, 192, 175)
-WHITE = (255, 255, 255)
-ACCENT = {
-    "war": (140, 30, 30), "climate": (31, 110, 72), "market": (24, 74, 130),
-    "tech": (90, 50, 130), "space": (40, 60, 120), "sport": (176, 96, 0),
-    "culture": (150, 60, 110), "health": (20, 120, 110), "us": (24, 74, 130),
-    "world": (90, 90, 90),
-}
+MUTED = (90, 84, 72)
+RED = (176, 32, 32)
+NAVY = (31, 58, 95)
+RULE = (180, 172, 156)
+LIGHT_RULE = (214, 207, 192)
 
-SERIF_B = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
-SANS = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-SANS_B = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
 
-def font(path, size):
-    return ImageFont.truetype(path, size)
+def load(name, size):
+    """Load a DejaVu font, falling back to Pillow's built-in bitmap font."""
+    path = os.path.join(FONT_DIR, name)
+    try:
+        return ImageFont.truetype(path, size)
+    except (OSError, IOError):
+        return ImageFont.load_default()
 
 
-F_TITLE = font(SERIF_B, 48)
-F_DATE = font(SANS_B, 19)
-F_META = font(SANS_B, 13)
-F_KICK = font(SANS_B, 10)
-F_HEAD = font(SANS_B, 13)
-F_BODY = font(SANS, 11)
-F_TOP_HEAD = font(SANS_B, 19)
-F_TOP_BODY = font(SANS, 12)
-F_TICK = font(SANS_B, 12)
-F_FOOT = font(SANS, 11)
-
-img = Image.new("RGB", (W, H), BG)
-d = ImageDraw.Draw(img)
+SERIF_BOLD = lambda s: load("DejaVuSerif-Bold.ttf", s)
+SANS_BOLD = lambda s: load("DejaVuSans-Bold.ttf", s)
+SANS = lambda s: load("DejaVuSans.ttf", s)
+# No oblique DejaVu Sans ships on this system (only Sans, Sans-Bold,
+# Serif and Serif-Bold), so "oblique" text is set in regular Sans rather
+# than falling back to Pillow's bitmap font, which lacks glyphs like
+# the em dash and bullet used in the teaser line and footer.
+SANS_OBLIQUE = lambda s: load("DejaVuSans.ttf", s)
 
 
-def wrap(text, f, width):
-    """Greedy word wrap to pixel width; returns list of lines."""
-    lines, cur = [], ""
-    for word in text.split():
-        trial = (cur + " " + word).strip()
-        if d.textlength(trial, font=f) <= width:
-            cur = trial
+def wrap(draw, text, font, max_width):
+    """Greedy word wrap returning a list of lines that fit max_width."""
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        trial = word if not current else current + " " + word
+        if draw.textlength(trial, font=font) <= max_width:
+            current = trial
         else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
     return lines
 
 
-def glyph(draw, kind, x, y, s, color):
-    """Draw a tiny white pictogram inside an s x s box at (x, y)."""
-    if kind == "globe":  # circle + meridians
-        draw.ellipse([x + 2, y + 2, x + s - 2, y + s - 2], outline=color, width=2)
-        draw.ellipse([x + s // 2 - 3, y + 2, x + s // 2 + 3, y + s - 2],
-                     outline=color, width=1)
-        draw.line([x + 2, y + s // 2, x + s - 2, y + s // 2], fill=color, width=1)
-    elif kind == "flame":  # simple flame
-        draw.polygon([(x + s // 2, y + 1), (x + s - 2, y + s - 6),
-                      (x + s // 2 + 2, y + s - 2), (x + 2, y + s - 6)],
-                     fill=color)
-    elif kind == "ship":
-        draw.polygon([(x + 2, y + s - 6), (x + s - 2, y + s - 6),
-                      (x + s - 5, y + s - 1), (x + 5, y + s - 1)], fill=color)
-        draw.line([x + s // 2, y + 2, x + s // 2, y + s - 7], fill=color, width=2)
-        draw.polygon([(x + s // 2, y + 2), (x + s - 4, y + s - 7),
-                      (x + s // 2, y + s - 7)], fill=color)
-    elif kind == "chart":  # rising bars
-        draw.rectangle([x + 2, y + s - 6, x + 5, y + s - 2], fill=color)
-        draw.rectangle([x + 7, y + s - 10, x + 10, y + s - 2], fill=color)
-        draw.rectangle([x + 12, y + s - 14, x + 15, y + s - 2], fill=color)
-    elif kind == "chip":
-        draw.rectangle([x + 4, y + 4, x + s - 4, y + s - 4], outline=color, width=2)
-        for px in (x + 6, x + s // 2, x + s - 7):
-            draw.line([px, y + 1, px, y + 4], fill=color, width=1)
-            draw.line([px, y + s - 4, px, y + s - 1], fill=color, width=1)
-    elif kind == "rocket":
-        draw.polygon([(x + s // 2, y + 1), (x + s - 3, y + s - 8),
-                      (x + s // 2, y + s - 5), (x + 3, y + s - 8)], fill=color)
-        draw.polygon([(x + s // 2 - 2, y + s - 5), (x + s // 2 + 2, y + s - 5),
-                      (x + s // 2, y + s - 1)], fill=color)
-    elif kind == "ball":
-        draw.ellipse([x + 2, y + 2, x + s - 2, y + s - 2], outline=color, width=2)
-        draw.polygon([(x + s // 2, y + s // 2 - 3), (x + s // 2 + 3, y + s // 2 + 1),
-                      (x + s // 2 - 3, y + s // 2 + 1)], fill=color)
-    elif kind == "cross":  # health
-        draw.rectangle([x + s // 2 - 2, y + 2, x + s // 2 + 2, y + s - 2], fill=color)
-        draw.rectangle([x + 2, y + s // 2 - 2, x + s - 2, y + s // 2 + 2], fill=color)
-    elif kind == "ballot":  # ballot box + tick
-        draw.rectangle([x + 2, y + 4, x + s - 2, y + s - 2], outline=color, width=2)
-        draw.line([x + 4, y + s // 2 + 1, x + s // 2, y + s - 4,
-                   x + s - 3, y + 3], fill=color, width=2)
-    elif kind == "star":
-        cx, cy, r = x + s // 2, y + s // 2, s // 2 - 1
-        pts = [(cx, cy - r), (cx + 3, cy - 2), (cx + r, cy - 2), (cx + 5, cy + 2),
-               (cx + 7, cy + r - 1), (cx, cy + 4), (cx - 7, cy + r - 1),
-               (cx - 5, cy + 2), (cx - r, cy - 2), (cx - 3, cy - 2)]
-        draw.polygon(pts, fill=color)
-    elif kind == "film":  # camera / culture
-        draw.rectangle([x + 2, y + 5, x + s - 2, y + s - 3], outline=color, width=2)
-        draw.ellipse([x + s // 2 - 3, y + s // 2 - 2, x + s // 2 + 3, y + s // 2 + 4],
-                     outline=color, width=2)
-    else:  # "dot" fallback
-        draw.ellipse([x + 4, y + 4, x + s - 4, y + s - 4], fill=color)
+def draw_centered(draw, y, text, font, fill=INK):
+    """Draw text centred on the page at the given y; return its height."""
+    width = draw.textlength(text, font=font)
+    draw.text(((SIZE - width) / 2, y), text, font=font, fill=fill)
+    return font.getbbox(text)[3]
 
 
-def icon(draw, kind, accent, x, y):
-    s = 17
-    draw.rounded_rectangle([x, y, x + s, y + s], radius=4, fill=accent)
-    glyph(draw, kind, x + 1, y + 1, s - 2, WHITE)
+def rule(draw, y, weight=2, fill=RULE, x0=None, x1=None):
+    """Draw a horizontal rule across the content width."""
+    x0 = MARGIN if x0 is None else x0
+    x1 = SIZE - MARGIN if x1 is None else x1
+    draw.line([(x0, y), (x1, y)], fill=fill, width=weight)
 
 
-# ---------- data: 30 stories, all dated Tuesday 24 November 2026 ----------
-# (kicker, headline, summary, icon kind, accent)
-TOP = [
-    ("1. PHARMA  •  MARKETS",
-     "SANOFI BUYS INSMED FOR $41BN",
-     "French drugmaker agrees its biggest deal in 20 years, $175 a share in "
-     "cash for the US biotech; the largest pharma takeover of 2026.",
-     "chart", "market"),
-    ("2. WAR  •  SAUDI ARABIA",
-     "HOUTHIS HIT RIYADH'S TALLEST TOWER",
-     "Missile strike injures 11 in the Saudi capital; Houthi fighters close "
-     "to within 60 km of Aden.",
-     "flame", "war"),
-    ("3. SPORT  •  AFRICA",
-     "SENEGAL CHAMPIONS AGAIN",
-     "Sport's top court restores Senegal's Africa Cup title, overturning "
-     "the ruling that gave it to Morocco.",
-     "ball", "sport"),
+# ---------------------------------------------------------------------------
+# The thirty stories, written for this poster from the day's reported facts.
+# Each entry is (headline, one short summary). Headlines stay short so they
+# fit one or two lines at column width; summaries run to at most two lines.
+# ---------------------------------------------------------------------------
+
+TOP_STORIES = [
+    ("Sanofi seals $41bn Insmed buyout",
+     "French drugmaker agrees $175 a share in cash, its biggest deal in over "
+     "20 years and the largest pharma takeover of 2026."),
+    ("Riyadh's tallest tower hit again",
+     "A strike on the PIF Tower wounds 11 people, the second attack on the "
+     "landmark in under a week."),
+    ("Senegal's crown restored by court",
+     "Sport's top court overturns the ruling that handed the Africa Cup to "
+     "Morocco; Senegal's 1-0 final win stands."),
 ]
 
-COLS = [
-    ("WAR & DIPLOMACY", "9", [
-        ("GAZA",
-         "Israeli strikes kill Hamas security chief",
-         "Naeem Abu Nahel and six others die in Gaza strikes, medics and police say.",
-         "flame", "war"),
-        ("UKRAINE",
-         "Russian strike on Zaporizhzhia kills 2",
-         "Overnight attack on an apartment block wounds 40, including four children.",
-         "flame", "war"),
-        ("HUNGARY",
-         "Hungary's PM meets Zelensky in Ukraine",
-         "Péter Magyar visits Uzhhorod, backing Kyiv's EU bid on his first trip since 2015.",
-         "star", "world"),
-        ("POLAND",
-         "Russian drone briefly enters Polish airspace",
-         "Drone strays over Poland during a large Russian attack on western Ukraine overnight.",
-         "flame", "war"),
-        ("RUSSIA",
-         "Kremlin sees no role for Europe at talks",
-         "Moscow says it sees no added value in Europe joining Ukraine peace talks; no date set.",
-         "star", "world"),
-        ("KOREA",
-         "Russian jets enter Korea's defence zone",
-         "Seoul scrambles after aircraft fly near Ulleung Island; a shelter alert is lifted.",
-         "flame", "war"),
-        ("UKRAINE",
-         "Latvia: war may hit a tipping point in 2027",
-         "President Rinkevics tells Reuters next year could bring Russia's defeat.",
-         "star", "world"),
-        ("GERMANY",
-         "Germany gets access to Ukraine's Delta system",
-         "Berlin is first to join Kyiv's battlefield network; more interceptor missiles agreed.",
-         "chip", "tech"),
-        ("BRITAIN",
-         "UK warns firms of Russian sabotage threat",
-         "Defence ministry and MI5 alert companies supplying Ukraine to brace for attacks.",
-         "flame", "war"),
+COLUMNS = [
+    ("WAR & DIPLOMACY", [
+        ("Gaza strike kills Hamas security chief",
+         "Naeem Abu Nahel dies with six others as Israeli strikes hit Gaza."),
+        ("Two killed in strike on flats",
+         "A Russian strike on an apartment block in Zaporizhzhia kills two "
+         "and wounds 40, including four children."),
+        ("Hungary's new PM meets Zelensky",
+         "Peter Magyar meets Zelensky in Uzhhorod, backing Ukraine's EU bid "
+         "on his first visit as PM."),
+        ("Russian drone slips into Poland",
+         "A Russian drone briefly crosses Polish airspace overnight during a "
+         "heavy attack on western Ukraine."),
+        ("Kremlin cool on Europe at talks",
+         "Moscow says it sees no added value in Europe joining Ukraine peace "
+         "talks; no date is set."),
+        ("War 'tipping point' seen in 2027",
+         "Latvia's president warns the war may reach a tipping point in 2027."),
+        ("Germany first into Delta network",
+         "Berlin joins Ukraine's Delta battlefield network first and pledges "
+         "more interceptor missiles."),
+        ("UK warns firms of sabotage risk",
+         "The defence ministry and MI5 alert companies supplying Ukraine to "
+         "a Russian sabotage threat."),
+        ("Britain sanctions the Houthis",
+         "London imposes sanctions on the Houthis after the strike on "
+         "Riyadh's tower."),
     ]),
-    ("MARKETS & AMERICAS", "9", [
-        ("ENERGY",
-         "Equinor signs 18-year gas deal with VNG",
-         "Norway to supply Germany 1.4bn cubic metres a year to 2044, its longest gas deal since 1986.",
-         "chart", "market"),
-        ("MARKETS",
-         "Stocks slip as rate worries return",
-         "S&P 500 falls 0.95% after a Fed official hints at higher rates; Stoxx 50 down 1.2%.",
-         "chart", "market"),
-        ("BRITAIN",
-         "Britain sanctions the Houthis",
-         "London designates the group and four officials after the Riyadh tower strike.",
-         "star", "world"),
-        ("NORWAY",
-         "Norway pledges $7bn more for Ukraine",
-         "Oslo to give at least $7bn in 2027 aid, focused on air defence and drones.",
-         "chart", "market"),
-        ("ENERGY",
-         "Europe gas prices climb in cold snap",
-         "Prices rise as freezing weather threatens already low reserves.",
-         "flame", "world"),
-        ("USA",
-         "Pentagon holds up 60 Patriot missiles",
-         "Hegseth has yet to approve interceptors already pledged to Ukraine, the FT reports.",
-         "ballot", "us"),
-        ("CANADA",
-         "Canada hits back at Pentagon rebuke",
-         "Defence minister says Ottawa answers to no one in Washington after Monday's broadside.",
-         "ballot", "us"),
-        ("USA",
-         "Zelensky to seek more US aid if talks fail",
-         "Kyiv will turn to the new Congress for arms and tougher sanctions if no deal by year-end.",
-         "ballot", "us"),
-        ("USA",
-         "Trump pardons turkeys Freedom and Feathers",
-         "Two West Virginia birds get the annual Thanksgiving reprieve at the White House.",
-         "star", "us"),
+    ("MARKETS & AMERICAS", [
+        ("Norway seals 18-year gas deal",
+         "Equinor signs with VNG to send 1.4bn cubic metres a year to 2044, "
+         "Norway's longest gas deal since 1986."),
+        ("Stocks slide as rate fears return",
+         "The S&P 500 falls 0.95% after a Fed official hints at higher "
+         "rates; the Stoxx 50 drops 1.2%."),
+        ("Norway pledges $7bn for Ukraine",
+         "Oslo promises at least $7bn in 2027 aid, focused on air defence "
+         "and drones."),
+        ("Cold snap lifts Europe gas prices",
+         "Freezing weather pushes gas prices up as already low reserves come "
+         "under strain."),
+        ("Patriot missiles still unapproved",
+         "The Pentagon has yet to approve 60 Patriot interceptors already "
+         "promised to Ukraine."),
+        ("Canada hits back at Pentagon",
+         "Ottawa's defence minister says Canada answers to no one in "
+         "Washington after Monday's broadside."),
+        ("Kyiv to turn to new Congress",
+         "Zelensky says Ukraine will seek arms and tougher sanctions from "
+         "the new Congress if no deal comes by year-end."),
+        ("Trump pardons two turkeys",
+         "Freedom and Feathers are spared at the White House's annual "
+         "Thanksgiving ceremony."),
+        ("Nvidia slides as AI rally fades",
+         "Shares fall after Monday's record rally as worries over interest "
+         "rates return."),
     ]),
-    ("SCIENCE, TECH, SPORT & LIFE", "9", [
-        ("CLIMATE",
-         "After COP31 collapse, EU seeks new rules",
-         "Brussels will push the UN to overhaul climate talks after Antalya ended with no deal.",
-         "globe", "climate"),
-        ("CHINA",
-         "Corruption probe hits Politburo member",
-         "Beijing opens an investigation into Chen Jining, a senior Shanghai leader.",
-         "star", "world"),
-        ("SPACE",
-         "China names crew with Pakistani astronaut",
-         "Pakistan's first astronaut will board China's space station on the new mission.",
-         "rocket", "space"),
-        ("SPACE",
-         "Earliest quasar ever found",
-         "Scientists spot a quasar formed just 630 million years after the Big Bang.",
-         "rocket", "space"),
-        ("TECH",
-         "Nvidia slides as AI rally fades",
-         "Shares fall after Monday's record rally as rate worries return; chip stocks follow.",
-         "chip", "tech"),
-        ("ASIA",
-         "Malaysia to return 6,500 Rohingya",
-         "Refugees will be sent back to Myanmar, drawing rights groups' alarm.",
-         "globe", "world"),
-        ("AFRICA",
-         "Ebola teams freed after 3 days trapped",
-         "WHO evacuates staff from an Ituri hospital after sheltering three days amid fighting.",
-         "cross", "health"),
-        ("VIETNAM",
-         "Hanoi hot-pot blast kills 6",
-         "An explosion at an eatery in the capital injures more than a dozen.",
-         "flame", "world"),
-        ("VATICAN",
-         "Pope Francis diary reveals dark visions",
-         "Published notes describe a spiritual crisis and visions of the devil.",
-         "film", "culture"),
+    ("SCIENCE, TECH, SPORT & LIFE", [
+        ("EU seeks climate-talk overhaul",
+         "After the Antalya summit ends with no deal, Brussels will push "
+         "the UN to rework climate talks."),
+        ("Beijing probes senior leader",
+         "China opens a corruption inquiry into Politburo member Chen "
+         "Jining, a senior Shanghai figure."),
+        ("Pakistan's first astronaut named",
+         "China names the crew for its next space station mission, "
+         "including Pakistan's first astronaut."),
+        ("Earliest quasar ever spotted",
+         "Astronomers find a quasar that formed just 630 million years "
+         "after the Big Bang."),
+        ("Malaysia to return 6,500 Rohingya",
+         "Kuala Lumpur plans to send 6,500 Rohingya refugees back to "
+         "Myanmar, alarming rights groups."),
+        ("Ebola teams freed after 3 days",
+         "WHO staff are evacuated from an Ituri hospital after sheltering "
+         "three days amid fighting."),
+        ("Hanoi hot-pot blast kills six",
+         "An explosion at an eatery kills six and injures more than "
+         "a dozen."),
+        ("Pope's diary reveals dark visions",
+         "Published notes describe a spiritual crisis and visions of "
+         "the devil."),
+        ("Chess title defence opens in draw",
+         "Gukesh holds Sindarov to a 38-move draw in game one of the world "
+         "title match in Geneva."),
     ]),
 ]
 
-TICKER = ("TICKER  •  SANOFI BUYS INSMED $41BN  •  HOUTHIS HIT RIYADH  •  "
-          "SENEGAL CHAMPIONS AGAIN  •  NORWAY GIVES UKRAINE $7BN")
+TICKER = ("SANOFI BUYS INSMED FOR $41BN   \u2022   PIF TOWER STRUCK AGAIN, "
+          "11 HURT   \u2022   SENEGAL REGAIN AFCON TITLE   \u2022   "
+          "S&P 500 SLIDES   \u2022   NORWAY PLEDGES $7BN FOR UKRAINE")
 
-# ---------- masthead ----------
-d.rectangle([0, 0, W, 6], fill=RED)
-y = 14
-d.text((24, y), "THE WORLD IN ONE DAY", font=F_TITLE, fill=INK)
-y += 60
-d.text((24, y), "TUESDAY  •  24 NOVEMBER 2026", font=F_DATE, fill=RED)
-right = "30 STORIES  •  WORLDWIDE  •  ONE DAY"
-d.text((W - 24 - d.textlength(right, font=F_META), y + 3), right, font=F_META, fill=GREY)
-y += 28
-d.line([24, y, W - 24, y], fill=INK, width=2)
-y += 9
+FOOTER = "All events of Tuesday 24 November 2026, as reported that day."
+FOOTER_Y = 962  # footer baseline; footer text height is ~17 px, so the
+# lowest ink on the page sits near y 979, safely inside the 1024 canvas.
 
-# ---------- top stories ----------
-col_w = (W - 48 - 2 * 16) // 3
-top_y = y
-top_h = 0
-for i, (kick, head, body, kind, acc) in enumerate(TOP):
-    x = 24 + i * (col_w + 16)
-    yy = top_y
-    d.line([x, yy, x + col_w, yy], fill=RED, width=3)
-    yy += 8
-    icon(d, kind, ACCENT[acc], x, yy)
-    d.text((x + 23, yy + 2), kick, font=F_KICK, fill=RED)
-    yy += 21
-    for line in wrap(head, F_TOP_HEAD, col_w):
-        d.text((x, yy), line, font=F_TOP_HEAD, fill=INK)
-        yy += 23
-    yy += 1
-    for line in wrap(body, F_TOP_BODY, col_w):
-        d.text((x, yy), line, font=F_TOP_BODY, fill=INK)
-        yy += 15
-    yy += 2
-    top_h = max(top_h, yy - top_y)
-y = top_y + top_h + 6
 
-# ---------- three columns ----------
-sec_y = y
-col_bottom = sec_y
-for ci, (title, count, items) in enumerate(COLS):
-    x = 24 + ci * (col_w + 16)
-    d.rectangle([x, sec_y, x + col_w, sec_y + 23], fill=NAVY)
-    d.text((x + 8, sec_y + 4), title, font=F_KICK, fill=WHITE)
-    d.text((x + col_w - 8 - d.textlength(count, font=F_KICK), sec_y + 4),
-           count, font=F_KICK, fill=WHITE)
-    yy = sec_y + 29
-    for kick, head, body, kind, acc in items:
-        icon(d, kind, ACCENT[acc], x, yy)
-        d.text((x + 23, yy + 2), kick, font=F_KICK, fill=RED)
-        yy += 17
-        for line in wrap(head, F_HEAD, col_w):
-            d.text((x, yy), line, font=F_HEAD, fill=INK)
-            yy += 16
-        for line in wrap(body, F_BODY, col_w):
-            d.text((x, yy), line, font=F_BODY, fill=BODY_GREY)
-            yy += 13
-        yy += 2
-        d.line([x, yy, x + col_w, yy], fill=LINE, width=1)
-        yy += 8
-    col_bottom = max(col_bottom, yy)
-y = col_bottom + 2
+def draw_top_stories(draw, y):
+    """Draw the three lead stories side by side; return the next free y."""
+    label_font = SANS_BOLD(13)
+    head_font = SANS_BOLD(15)
+    body_font = SANS(12)
+    label = "TOP STORIES"
+    draw.text((MARGIN, y), label, font=label_font, fill=RED)
+    y += 22
+    col_x = [MARGIN + i * (COL_W + GUTTER) for i in range(3)]
+    max_y = y
+    for i, (headline, summary) in enumerate(TOP_STORIES):
+        x = col_x[i]
+        draw.text((x, y), "%d." % (i + 1), font=SANS_BOLD(15), fill=RED)
+        hx = x + 22
+        lines = wrap(draw, headline, head_font, COL_W - 22)
+        ty = y
+        for line in lines:
+            draw.text((hx, ty), line, font=head_font, fill=INK)
+            ty += 18
+        for line in wrap(draw, summary, body_font, COL_W):
+            draw.text((x, ty), line, font=body_font, fill=MUTED)
+            ty += 15
+        max_y = max(max_y, ty)
+    return max_y + 6
 
-# ---------- ticker + footer ----------
-d.rectangle([0, y, W, y + 25], fill=NAVY)
-d.text((24, y + 6), TICKER, font=F_TICK, fill=WHITE)
-y += 25
-d.text((24, y + 5),
-       "All events of Tuesday 24 November 2026, as reported that day.",
-       font=F_FOOT, fill=GREY)
 
-assert y + 20 <= H, "layout overflow: %d" % (y + 20)
-img.save("/home/hatch/workspace/make-fun-bounty/build/news-image-20261124/entry.png",
-         optimize=True)
-print("saved, bottom y =", y)
+def draw_column(draw, x, y, bottom, title, stories, summary_size=11):
+    """Draw one column of stories; return the y just below the last item."""
+    head_font = SANS_BOLD(13)
+    body_font = SANS(summary_size)
+    title_font = SANS_BOLD(14)
+    # Section header: small coloured bar with white title text.
+    draw.rectangle([x, y, x + COL_W, y + 26], fill=NAVY)
+    draw.text((x + 8, y + 5), title, font=title_font, fill=(255, 255, 255))
+    y += 26 + 8
+    for headline, summary in stories:
+        head_lines = wrap(draw, headline, head_font, COL_W)
+        for line in head_lines:
+            draw.text((x, y), line, font=head_font, fill=INK)
+            y += 16
+        for line in wrap(draw, summary, body_font, COL_W):
+            draw.text((x, y), line, font=body_font, fill=MUTED)
+            y += 14
+        y += 7
+        if y > bottom:
+            raise ValueError("column %r overflows its budget" % title)
+    return y
+
+
+def build_poster():
+    """Compose the poster and return the finished Pillow image."""
+    img = Image.new("RGB", (SIZE, SIZE), PAPER)
+    draw = ImageDraw.Draw(img)
+
+    # --- Masthead -------------------------------------------------------
+    y = 26
+    draw_centered(draw, y, "THE WORLD IN ONE DAY", SERIF_BOLD(54), INK)
+    y = 96
+    rule(draw, y, weight=3, fill=INK)
+    y = 106
+    draw_centered(draw, y, "Tuesday  \u2022  24 November 2026",
+                  SANS_BOLD(22), RED)
+    y = 140
+    rule(draw, y, weight=1, fill=RULE)
+    y = 150
+    draw_centered(draw, y, "30 STORIES  \u2022  WORLDWIDE  \u2022  ONE DAY",
+                  SANS_BOLD(14), NAVY)
+    y = 176
+    top_line = ("TOP STORIES \u2014 Sanofi's $41bn swoop  \u2022  Riyadh tower "
+                "hit again  \u2022  Senegal's crown restored")
+    draw_centered(draw, y, top_line, SANS_OBLIQUE(13), MUTED)
+    y = 202
+    rule(draw, y, weight=2, fill=INK)
+
+    # --- Lead stories ---------------------------------------------------
+    y = draw_top_stories(draw, 214)
+    rule(draw, y + 2, weight=1, fill=RULE)
+
+    # --- Three columns --------------------------------------------------
+    col_top = y + 14
+    col_bottom = 884
+    for i, (title, stories) in enumerate(COLUMNS):
+        x = MARGIN + i * (COL_W + GUTTER)
+        draw_column(draw, x, col_top, col_bottom, title, stories)
+
+    # --- Ticker ---------------------------------------------------------
+    draw.rectangle([MARGIN, 896, SIZE - MARGIN, 944], fill=NAVY)
+    ticker_font = SANS_BOLD(14)
+    lines = wrap(draw, TICKER, ticker_font, SIZE - 2 * MARGIN - 24)
+    ty = 896 + (48 - 17 * len(lines)) // 2
+    for line in lines:
+        width = draw.textlength(line, font=ticker_font)
+        draw.text(((SIZE - width) / 2, ty), line, font=ticker_font,
+                  fill=(255, 255, 255))
+        ty += 17
+
+    # --- Footer ---------------------------------------------------------
+    # Guard: the footer must sit fully inside the canvas, with a margin.
+    if FOOTER_Y + 20 > SIZE:
+        raise ValueError("footer at y %d would run off the page" % FOOTER_Y)
+    draw_centered(draw, FOOTER_Y, FOOTER, SANS_OBLIQUE(13), MUTED)
+    return img
+
+
+def verify_output(path, img):
+    """Sanity-check the saved poster: size, mode, story count, file size.
+
+    Raises ValueError if anything is off, so a bad render fails loudly
+    instead of silently producing a broken entry.
+    """
+    if img.size != (SIZE, SIZE):
+        raise ValueError("poster is %s, expected %dx%d"
+                         % (img.size, SIZE, SIZE))
+    if img.mode != "RGB":
+        raise ValueError("poster mode is %s, expected RGB" % img.mode)
+    stories = len(TOP_STORIES) + sum(len(s) for _, s in COLUMNS)
+    if stories != 30:
+        raise ValueError("poster holds %d stories, expected 30" % stories)
+    size = os.path.getsize(path)
+    if size > 1048576:
+        raise ValueError("poster is %d bytes, over the 1 MiB limit" % size)
+    return size
+
+
+def main():
+    img = build_poster()
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "entry.png")
+    img.save(out_path, format="PNG")
+    checked_bytes = verify_output(out_path, img)
+    with open(out_path, "rb") as fh:
+        data = fh.read()
+    assert len(data) == checked_bytes, "file changed between checks"
+    digest = hashlib.sha256(data).hexdigest()
+    stories = len(TOP_STORIES) + sum(len(s) for _, s in COLUMNS)
+    print("poster: %s" % out_path)
+    print("size: %dx%d" % img.size)
+    print("stories: %d" % stories)
+    print("bytes: %d" % len(data))
+    print("sha256: %s" % digest)
+
+
+if __name__ == "__main__":
+    main()
